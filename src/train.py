@@ -7,12 +7,19 @@ from utils.data_handler import DataLoader
 
 import argparse
 
+"""
+Limit all lines to maximum of 79 characters
+===============================================================================
+"""
+
 def parse_args():
     """
     Parse command line arguments.
 
-    The other arguments not defined in this function are directly passed to main.py. For instance,
-    an option like "--beta 1" is given directly to the main script.
+    The other arguments not defined in this function are directly passed to
+    main.py
+    For instance, an option like "--beta 1" is given directly to the main
+    script.
 
     :return: the parsed arguments.
     """
@@ -43,7 +50,7 @@ def parse_args():
     parser.add_argument('--train_period', type=int, default=10)
     parser.add_argument('--inverse', type=str2bool, default=False)
     parser.add_argument('--name', type=str, default='us_etf2')
-    parser.add_argument('--file_path', type=str, default="data/{}_{}.pkl".format("etf", "20250428"))
+    parser.add_argument('--file_path', type=str)
     return parser.parse_known_args()
 
 def main():
@@ -73,7 +80,8 @@ def main():
     name = args.name
     file_path = args.file_path
 
-    data_loader = DataLoader(target_date, train_period, window_period, window_length, file_path)
+    data_loader = DataLoader(target_date, train_period, window_period, window_length,
+                             file_path)
     train_data = data_loader.get_train_data()
     stocks = data_loader.abbreviation
     nb_classes = len(stocks) + 1
@@ -82,28 +90,33 @@ def main():
     state_dim = [nb_classes, int(window_length/window_period)]
     num_training_time = data_loader.num_training_time
 
-    agent = DDPG(np.prod(state_dim), np.prod(action_dim), action_bound, seed, feature_type, activation, actor_predictor, critic_predictor, len(stocks), actor_num_layer=actor_num_layer, actor_hidden=actor_hidden, critic_num_layer=critic_num_layer, critic_hidden=critic_hidden)
-    env = PortfolioEnv(train_data, len(stocks), num_training_time, num_training_time-window_length-window_period, window_length, window_period, rebalancing, buy_fee, sell_fee, time_cost, mdd_alpha, beta, action_bound, random_start, inverse=inverse)
+    agent = DDPG(np.prod(state_dim), np.prod(action_dim), action_bound, seed,
+                 feature_type,activation, actor_predictor, critic_predictor,
+                 len(stocks),actor_num_layer=actor_num_layer,
+                 actor_hidden=actor_hidden,critic_num_layer=critic_num_layer,
+                 critic_hidden=critic_hidden)
+    env = PortfolioEnv(train_data, len(stocks), num_training_time,
+                       num_training_time-window_length-window_period,
+                       window_length, window_period, rebalancing,
+                       buy_fee, sell_fee, time_cost, mdd_alpha, beta,
+                       action_bound, random_start, inverse=inverse)
 
+    # Main training loop
     for _ in range(episode):
         state, info = env.reset()
         if inverse:
             state = apply_inverse_price_tensor(state)
-        # print("RESET:", state[-1,0,-1], state[-1,-1,-1])
         state = agent.obs_normalizer(state)
 
         episode_reward = 0
         for step in tqdm(range(max_step)):
-            # print(state.shape)
             action = agent.select_action(state, agent.noise())
             next_state, reward, done, info = env.step(action)
             if inverse:
                 next_state = apply_inverse_price_tensor(next_state)
 
-            # print("state:", next_state[-1,0,-1], next_state[-1,-1,-1])
             next_state = agent.obs_normalizer(next_state)
             agent.add_transition((state, next_state, action, reward, float(done)))
-            
             agent.train()
 
             state = next_state
@@ -112,8 +125,16 @@ def main():
                 break
 
         print(f"Episode: {_}, Reward: {episode_reward}, PV: {info['portfolio_value']}, max-Q: {agent.maxQ}")
-    actor_path = get_actor_path(name, episode, window_length, window_period, train_period, actor_predictor, critic_predictor, mdd_alpha, beta, action_bound, seed, buy_fee, sell_fee, time_cost, target_date, rebalancing)
-    critic_path = get_critic_path(name, episode, window_length, window_period, train_period, actor_predictor, critic_predictor, mdd_alpha, beta, action_bound, seed, buy_fee, sell_fee, time_cost, target_date, rebalancing)
+
+    # Save the trained model
+    actor_path = get_actor_path(name, episode, window_length, window_period,
+                                train_period, actor_predictor, critic_predictor,
+                                mdd_alpha, beta, action_bound, seed, buy_fee,
+                                sell_fee, time_cost, target_date, rebalancing)
+    critic_path = get_critic_path(name, episode, window_length, window_period,
+                                  train_period, actor_predictor, critic_predictor,
+                                  mdd_alpha, beta, action_bound, seed, buy_fee,
+                                  sell_fee, time_cost, target_date, rebalancing)
     agent.save_model(actor_path, critic_path)
 
 if __name__ == '__main__':

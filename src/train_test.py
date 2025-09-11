@@ -56,8 +56,8 @@ def main():
     country = args.country
 
     if country == "us":
-        data_path = '/home/jmhong20/rlpm_ete/data/us/snp500_data.csv'
-        numpy_path = '/home/jmhong20/rlpm_ete/data/us/snp500_data.npy'
+        data_path = '/home/jmhong20/regime-based-portfolio/data/us/snp500_data.csv'
+        numpy_path = '/home/jmhong20/regime-based-portfolio/data/us/snp500_data.npy'
 
     history_df = pd.read_csv(data_path)
     print(len(history_df['ticker'].unique()))
@@ -93,21 +93,15 @@ def main():
 
     for _ in range(episode):
         state, info = env.reset()
-        # print("RESET:", state[-1,0,-1], state[-1,-1,-1])
         state = agent.obs_normalizer(state)
 
         episode_reward = 0
         verbose = False
-        # for step in tqdm(range(max_step)):
         for step in range(max_step):
-        # for step in tqdm(range(1)):
-            # print(state.shape)
             if step % 10 == 0:
                 verbose = True
             action, portfolio_weights = agent.select_action(state, verbose=verbose, noise=agent.noise())
             verbose = False
-            # print(action)
-            # action = np.array([1.0] + [0.0 for __ in range(len(action)-1)])
             next_state, reward, done, info = env.step(action, portfolio_weights)
             next_state = agent.obs_normalizer(next_state)
             agent.add_transition((state, next_state, action, reward, float(done)))
@@ -119,12 +113,14 @@ def main():
                 break
 
         print(f"Episode: {_}, Reward: {episode_reward}, PV: {info['portfolio_value']}, max-Q: {agent.maxQ}", flush=True)
-        print(agent.replay_buffer.size() // agent.replay_buffer.batch_size)
-        for batch_count in range(agent.replay_buffer.size() // agent.replay_buffer.batch_size):
-            agent.train(training_phase='phase2')
 
-    actor_path = get_actor_path(country, episode, window_length, window_period, train_period, seed, buy_fee, sell_fee, time_cost, target_date, rebalancing)
-    critic_path = get_critic_path(country, episode, window_length, window_period, train_period, seed, buy_fee, sell_fee, time_cost, target_date, rebalancing)
+    actor_path = get_actor_path(country, episode, window_length, window_period,
+                                train_period, seed, buy_fee, sell_fee,
+                                time_cost, target_date, rebalancing)
+    critic_path = get_critic_path(country, episode, window_length,
+                                  window_period, train_period, seed,
+                                  buy_fee, sell_fee, time_cost,
+                                  target_date, rebalancing)
     agent.save_model(actor_path, critic_path)
 
 if __name__ == '__main__':

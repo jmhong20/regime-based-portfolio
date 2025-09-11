@@ -7,99 +7,54 @@ import math
 class PortfolioWeightGenerator(nn.Module):
     """
     Neural network that generates portfolio weights for each stock regime
-    Each regime has its own linear head that maps stock features to portfolio weights
+    Each regime has its own linear head that maps stock features to
+    portfolio weights
     """
-    def __init__(self, stock_feature_dim, num_stock_regimes, 
+    def __init__(self, stock_feature_dim, num_stock_regimes,
                  hidden_dim=64, num_layers=2, dropout=0.1):
         super(PortfolioWeightGenerator, self).__init__()
-        
+
         self.stock_feature_dim = stock_feature_dim
         self.num_stock_regimes = num_stock_regimes
         self.hidden_dim = hidden_dim
-        
-        # Input dimension: stock features + index regime probabilities
         input_dim = stock_feature_dim
-        
-        # Shared feature processing layers
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(dropout))
-        
         for _ in range(num_layers - 1):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
-        
         self.shared_mlp = nn.Sequential(*layers)
-        
-        # Regime-specific linear heads for portfolio weights
-        # Each head maps hidden_dim -> 1 (portfolio weight for that regime)
         self.regime_heads = nn.ModuleList([
             nn.Linear(hidden_dim, 1) for _ in range(num_stock_regimes)
         ])
-        
-        # Optional: Add a final activation for portfolio weights
-        # You can use tanh for [-1, 1] weights or remove for unbounded weights
-        self.weight_activation = nn.Tanh()  # Comment out if you want unbounded weights
-
+        self.weight_activation = nn.Tanh()
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x_stocks, noise=None):
+    def forward(self, x):
         """
         Args:
-            x_stocks: (batch_size, num_stocks, stock_feature_dim) - Individual stock features
-            index_regimes: (batch_size, index_regime_dim) - Market index regime probabilities
+            x_stocks: (batch_size, num_stocks,
+                       stock_feature_dim) - Individual stock features
+            index_regimes: (batch_size,
+                            index_regime_dim) - Market index regime probabilities
         Returns:
-            portfolio_weights: (batch_size, num_stock_regimes, num_stocks) - Portfolio weights for each regime
+            portfolio_weights: (batch_size, num_stock_regimes, num_stocks)
+                                    - Portfolio weights for each regime
         """
-        batch_size, num_stocks, _ = x_stocks.shape
-        
-        # Reshape for batch processing through shared MLP
-        # combined_flat: (batch_size * num_stocks, stock_feature_dim + index_regime_dim)
-        combined_flat = x_stocks.reshape(-1, x_stocks.size(-1))
-        
-        # Pass through shared MLP to get shared features
+        batch_size, num_stocks, _ = x.shape
+        combined_flat = x.reshape(-1, x.size(-1))
         shared_features = self.shared_mlp(combined_flat)
-        
-        # Apply each regime-specific head to get portfolio weights
         regime_weights = []
         for regime_head in self.regime_heads:
-            # regime_head: (batch_size * num_stocks, 1)
             weights = regime_head(shared_features)
-            
-            # Apply activation if specified
             if hasattr(self, 'weight_activation'):
                 weights = self.weight_activation(weights)
-            
-            # Reshape to (batch_size, num_stocks)
             weights = weights.reshape(batch_size, num_stocks)
-            
-            # Add noise to each regime's portfolio weights if noise is provided
-            if noise is not None:
-                # Convert noise to tensor if it's a numpy array
-                if not isinstance(noise, torch.Tensor):
-                    noise = torch.tensor(noise, dtype=weights.dtype, device=weights.device)
-                
-                # Ensure noise has the same shape as weights
-                if noise.shape != weights.shape:
-                    # If noise is a single value or different shape, expand it
-                    if noise.numel() == 1:
-                        noise_expanded = noise.expand_as(weights)
-                    else:
-                        # Try to broadcast noise to match weights shape
-                        noise_expanded = noise.expand_as(weights)
-                else:
-                    noise_expanded = noise
-                
-                # Add noise to weights
-                weights = weights + noise_expanded
-            
             regime_weights.append(weights)
-        
-        # Stack regime weights: (batch_size, num_stock_regimes, num_stocks)
         portfolio_weights = torch.stack(regime_weights, dim=1)
-        
         return self.softmax(portfolio_weights)
 
 class Actor(nn.Module):
@@ -107,12 +62,12 @@ class Actor(nn.Module):
                     seed,
                     N, T, F,
                     initial_feature_map_dim=16,
-                    hidden_dim=16, 
-                    num_layers=2, 
-                    dropout=0.1, 
-                    transformer_d_model=64, 
-                    transformer_nhead=8, 
-                    transformer_layers=2, 
+                    hidden_dim=16,
+                    num_layers=2,
+                    dropout=0.1,
+                    transformer_d_model=64,
+                    transformer_nhead=8,
+                    transformer_layers=2,
                     mlp_hidden_size=256
                 ):
         super(Actor, self).__init__()
@@ -131,33 +86,32 @@ class Actor(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
-        
-        # Temporal Attention layer
         self.temporal_attention = TemporalAttention(
-            P=hidden_dim,  # Use LSTM hidden size as P
+            P=hidden_dim,
             alstm_hidden=hidden_dim
         )
-        
-        # Index Regime Detector - outputs P(regime|x_index)
+        """
         self.index_regime_detector = IndexRegimeDetector(
             input_dim=hidden_dim,
-            num_regimes=3,  # Default to 3 regimes (bull, bear, sideways)
+            num_regimes=3,
             hidden_dim=64,
             num_layers=2,
             dropout=dropout
         )
-        
-        # Stock Regime Detector - outputs P(stock_regimes|index_regimes, x_stock)
+        """
+        self.index_regime_detector = NeuralHMMRegimeDetector(
+            hidden_dim=hidden_dim,
+            num_regimes=3, mid=192, dropout=0.1
+        )
+
         self.stock_regime_detector = StockRegimeDetector(
             stock_feature_dim=hidden_dim,
-            index_regime_dim=3,  # Same as index_regime_detector output
-            num_stock_regimes=3,  # Default to 4 stock regimes
+            index_regime_dim=3,
+            num_stock_regimes=3,
             hidden_dim=64,
             num_layers=2,
             dropout=dropout
         )
-        
-        # Transformer Encoder
         self.transformer = TransformerEncoder(
             input_dim=hidden_dim,
             num_stocks=N,
@@ -167,63 +121,54 @@ class Actor(nn.Module):
             dim_feedforward=mlp_hidden_size,
             dropout=dropout
         )
-
-        # Portfolio Weight Generator - outputs portfolio weights for each regime
         self.portfolio_weight_generator = PortfolioWeightGenerator(
             stock_feature_dim=hidden_dim,
-            num_stock_regimes=3,  # Default to 4 stock regimes
+            num_stock_regimes=3,
             hidden_dim=64,
             num_layers=2,
             dropout=dropout
         )
 
     def forward(self, x, noise=None, verbose=False):
-        if x.ndimension() == 3:  # Single sample case: (21, 10, 4)
-            x = x.unsqueeze(0)  # Add batch dimension → (1, 21, 10, 4)
-        
-        # feature transformation
+        if x.ndimension() == 3:  # Single sample case: (N,T,F)
+            x = x.unsqueeze(0)  # Add batch dimension → (batch,N,T,F)
         batch, _, _, _ = x.shape
-        reshaped_x = x.reshape(-1, self.F)  # Reshape to (batch×N×T, F)
+        reshaped_x = x.reshape(-1, self.F)
         transformed_x = self.feature_mapping(reshaped_x)
         x = transformed_x.reshape(-1, self.T, self.initial_feature_map_dim)
 
         x, _ = self.lstm(x)
         x = self.temporal_attention(x)
-
         x = x.reshape(batch, self.N+1, self.hidden_dim)
 
-        x_stocks = x[:,:-1,:]  # Stock features: (batch*N, hidden_dim)
-        x_index = x[:,-1,:]   # Index features: (batch, 1, hidden_dim)
+        x_stocks = x[:,:-1,:]  # Stock features: (batch,N,H)
+        x_index = x[:,-1,:]   # Index features: (batch,1,H)
 
-        x_stocks = x_stocks.reshape(-1, x_stocks.size(-1))  # Reshape to (batch×N×T, F)
-        x_index = x_index.reshape(-1, x_index.size(-1))  # Reshape to (batch×N×T, F)
-        
-        # Get regime probabilities P(regime|x_index)
-        index_regime_probs = self.index_regime_detector(x_index)
+        x_stocks = x_stocks.reshape(-1, x_stocks.size(-1))  # Reshape to (batch×N,H)
+        x_index = x_index.reshape(-1, x_index.size(-1))  # Reshape to (batch×1,H)
         x_stocks = self.transformer(x_stocks)
-        
+        # Get regime probabilities P(regime|x_index)
+        index_regime_probs, extras = self.index_regime_detector(x_index)
         batch_size = x_stocks.shape[0] // self.N
         x_stocks_reshaped = x_stocks.reshape(batch_size, self.N, -1)
-        
         # Get stock regime probabilities P(stock_regimes|index_regimes, x_stock)
         stock_regime_probs = self.stock_regime_detector(x_stocks_reshaped, index_regime_probs)
 
         # Get portfolio weights for each regime
         x_index_reshaped = x_index.reshape(batch_size, 1, -1)
         x = torch.cat([x_index_reshaped, x_stocks_reshaped], dim=1)
-        portfolio_weights = self.portfolio_weight_generator(x, noise=noise)
-        
+        portfolio_weights = self.portfolio_weight_generator(x)
+
         stock_regime_probs_t = stock_regime_probs.transpose(1, 2)
-        index_regime_probs_expanded = index_regime_probs.unsqueeze(-1)  # Shape: [1, 3, 1]
+        index_regime_probs_expanded = index_regime_probs.unsqueeze(-1)
         regime_probs = torch.cat([index_regime_probs_expanded, stock_regime_probs_t], dim=-1)
         weighted_portfolios = portfolio_weights * regime_probs
 
         final_portfolio = weighted_portfolios.sum(dim=1)
 
         if verbose:
-            print("cash weight", final_portfolio[0][0])
-        
-        # Return stock features, index regime probabilities, and final combined portfolio
+            # print("cash weight", final_portfolio[0][0])
+            print(index_regime_probs)
         return final_portfolio, portfolio_weights
 
 
@@ -291,7 +236,6 @@ class Critic(nn.Module):
     def forward(self, state, action):
         if state.ndimension() == 3:  # Single sample case: (21, 10, 4)
             state = state.unsqueeze(0)  # Add batch dimension → (1, 21, 10, 4)
-        
         # feature transformation
         batch, _, _, _ = state.shape
         reshaped_x = state.reshape(-1, self.F)  # Reshape to (batch×N×T, F)
@@ -308,15 +252,12 @@ class Critic(nn.Module):
 
         x_stocks = x_stocks.reshape(-1, x_stocks.size(-1))  # Reshape to (batch×N×T, F)
         x_index = x_index.reshape(-1, x_index.size(-1))  # Reshape to (batch×N×T, F)
-        
         x_stocks = self.transformer(x_stocks)
 
         x_stocks_reshaped = x_stocks.view(batch, self.N, -1)
         x_index_expanded = x_index.unsqueeze(1)
-        
         x = torch.concat([x_index_expanded, x_stocks_reshaped], axis=1)
         x = self.feature_out(x)
-    
         state = torch.flatten(x, start_dim=1)
         # Fully connected layers for state and action
         t1 = self.fc1(state)
@@ -332,6 +273,81 @@ class Critic(nn.Module):
         q_value = self.fc_out(x)
         return q_value
 
+class NeuralHMMRegimeDetector(nn.Module):
+    """
+    One-step Neural-HMM regime filter (index-level).
+    Inputs:
+        x: (B, H) feature at time t
+        prev_posterior (optional): (B, K) regime probs at t-1.
+            If None, uses uniform prior.
+    Outputs:
+        posterior: (B, K) regime posterior at t
+        extras: dict with 'trans': (B,K,K) and 'emit_logits': (B,K)
+    """
+    def __init__(self, hidden_dim: int, num_regimes: int, mid: int = 128, dropout: float = 0.0):
+        super().__init__()
+        self.K = num_regimes
+
+        # Transition net: x_t -> logits over KxK (from z_{t-1}=i to z_t=j)
+        self.trans_net = nn.Sequential(
+            nn.Linear(hidden_dim, mid), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(mid, num_regimes * num_regimes)
+        )
+
+        # Emission net: x_t -> regime-wise emission logits (proxy for log-likelihood)
+        # You can replace this with a Gaussian head if you have explicit observations.
+        self.emit_net = nn.Sequential(
+            nn.Linear(hidden_dim, mid), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(mid, num_regimes)
+        )
+
+        # Small bias towards self-transition (optional, helps persistence)
+        self.self_trans_bias = nn.Parameter(torch.zeros(num_regimes))
+
+    def forward(self, x: torch.Tensor, prev_posterior: torch.Tensor = None):
+        """
+        x: (B, H)
+        prev_posterior: (B, K) or None
+        returns:
+            posterior: (B, K)
+            extras: dict
+        """
+        B = x.size(0)
+        K = self.K
+
+        # ----- Transition matrix P(z_t=j | z_{t-1}=i, x_t)
+        trans_logits = self.trans_net(x)                        # (B, K*K)
+        trans_logits = trans_logits.view(B, K, K)               # (B, K_prev, K_curr)
+        # add self-transition bias on the diagonal
+        trans_logits = trans_logits + torch.diag(self.self_trans_bias).unsqueeze(0)  # (B,K,K)
+        trans_logprobs = F.log_softmax(trans_logits, dim=-1)    # row-stochastic in log-space
+
+        # ----- Emission "log-likelihood" per regime
+        emit_logits = self.emit_net(x)                          # (B, K)
+        emit_logprobs = F.log_softmax(emit_logits, dim=-1)      # normalized proxy; replace if you have true llh
+
+        # ----- Prior over z_{t-1}
+        prior = prev_posterior.clamp_min(1e-8)              # (B, K)
+        prior = prior / prior.sum(dim=-1, keepdim=True)
+
+        log_prior = prior.log()                                  # (B, K)
+
+        # ----- Filtering update in log-space:
+        # log pred_j = logsum_i [ prior_i * trans_{i->j} ]
+        # = logsumexp_i [ log_prior_i + log_trans_{i->j} ]
+        # shapes: (B, K, 1) + (B, K, K) -> reduce over i
+        log_pred = torch.logsumexp(log_prior.unsqueeze(-1) + trans_logprobs, dim=1)  # (B, K)
+
+        # posterior ∝ pred * emission  -> add in log-space then normalize
+        log_posterior_unnorm = log_pred + emit_logprobs         # (B, K)
+        posterior = F.softmax(log_posterior_unnorm, dim=-1)     # (B, K)
+
+        extras = {
+            "trans": trans_logprobs.exp(),      # (B,K,K)
+            "emit_logits": emit_logits          # (B,K)
+        }
+        return posterior, extras
+
 class IndexRegimeDetector(nn.Module):
     """
     Simple MLP-based regime detector that outputs P(regime|x_index)
@@ -341,41 +357,33 @@ class IndexRegimeDetector(nn.Module):
         self.input_dim = input_dim
         self.num_regimes = num_regimes
         self.hidden_dim = hidden_dim
-        
         # Build MLP layers
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(dropout))
-        
         for _ in range(num_layers - 1):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
-        
         layers.append(nn.Linear(hidden_dim, num_regimes))
         self.mlp = nn.Sequential(*layers)
-        
         # Softmax for probability output
         self.softmax = nn.Softmax(dim=-1)
-    
     def forward(self, x_index):
         """
         Args:
-            x_index: (batch_size, seq_len, input_dim) - Market index features
+            x_index: (batch,H) - Market index features
         Returns:
-            regime_probs: (batch_size, num_regimes) - P(regime|x_index)
+            regime_probs: (batch,R) - P(regime|x_index)
         """
         # If input has sequence dimension, take the last timestep
         if x_index.dim() == 3:
             x_index = x_index[:, -1, :]  # (batch_size, input_dim)
-        
         # Pass through MLP
         logits = self.mlp(x_index)
-        
         # Apply softmax to get probabilities
         regime_probs = self.softmax(logits)
-        
         return regime_probs
 
 class StockRegimeDetector(nn.Module):
@@ -386,29 +394,23 @@ class StockRegimeDetector(nn.Module):
     def __init__(self, stock_feature_dim, index_regime_dim, num_stock_regimes, 
                  hidden_dim=64, num_layers=2, dropout=0.1):
         super(StockRegimeDetector, self).__init__()
-        
         self.stock_feature_dim = stock_feature_dim
         self.index_regime_dim = index_regime_dim
         self.num_stock_regimes = num_stock_regimes
         self.hidden_dim = hidden_dim
-        
         # Input dimension: stock features + index regime probabilities
         input_dim = stock_feature_dim + index_regime_dim
-        
         # Build MLP layers
         layers = []
         layers.append(nn.Linear(input_dim, hidden_dim))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(dropout))
-        
         for _ in range(num_layers - 1):
             layers.append(nn.Linear(hidden_dim, hidden_dim))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
-        
         layers.append(nn.Linear(hidden_dim, num_stock_regimes))
         self.mlp = nn.Sequential(*layers)
-        
         # Softmax for probability output
         self.softmax = nn.Softmax(dim=-1)
 
@@ -421,28 +423,21 @@ class StockRegimeDetector(nn.Module):
             stock_regime_probs: (batch_size, num_stocks, num_stock_regimes) - P(stock_regime|index_regime, x_stock)
         """
         batch_size, num_stocks, _ = x_stocks.shape
-        
         # Expand index regimes to match stock dimensions
         # index_regimes: (batch_size, 1, index_regime_dim) -> (batch_size, num_stocks, index_regimes_dim)
         index_regimes_expanded = index_regimes.unsqueeze(1).expand(-1, num_stocks, -1)
-        
         # Concatenate stock features with index regime probabilities
         # combined: (batch_size, num_stocks, stock_feature_dim + index_regime_dim)
         combined_features = torch.cat([x_stocks, index_regimes_expanded], dim=-1)
-        
         # Reshape for batch processing through MLP
         # combined_flat: (batch_size * num_stocks, stock_feature_dim + index_regime_dim)
         combined_flat = combined_features.reshape(-1, combined_features.size(-1))
-        
         # Pass through MLP
         logits = self.mlp(combined_flat)
-        
         # Apply softmax to get probabilities
         regime_probs = self.softmax(logits)
-        
         # Reshape back to (batch_size, num_stocks, num_stock_regimes)
         stock_regime_probs = regime_probs.reshape(batch_size, num_stocks, self.num_stock_regimes)
-        
         return stock_regime_probs
 
 class FeatureMapping(nn.Module):
