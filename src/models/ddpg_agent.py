@@ -8,7 +8,7 @@ from collections import deque
 from .actor_critic import Actor, Critic
 
 # Check if GPU is available
-device = 1
+device = 3
 if device == None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # else:
@@ -46,7 +46,7 @@ class ReplayBuffer:
         self.count = 0
         self.buffer = deque()
 
-    def add(self, state, action, reward, next_state, done):
+    def add(self, state, action, reward, next_state, done, index_regime_prior, prev_prior):
         """
         Adds an experience to the buffer.
         
@@ -57,7 +57,7 @@ class ReplayBuffer:
             next_state: The state after the action was taken.
             done: Boolean indicating if the episode ended.
         """
-        experience = (state, action, reward, next_state, done)
+        experience = (state, action, reward, next_state, done, index_regime_prior, prev_prior)
         if self.count < self.buffer_size:
             self.buffer.append(experience)
             self.count += 1
@@ -81,7 +81,9 @@ class ReplayBuffer:
         rewards = np.array([_[2] for _ in batch])
         next_states = np.array([_[3] for _ in batch])
         dones = np.array([_[4] for _ in batch])
-        return states, actions, rewards, next_states, dones
+        index_regime_priors = np.array([_[5] for _ in batch])
+        prev_priors = np.array([_[6] for _ in batch])
+        return states, actions, rewards, next_states, dones, index_regime_priors, prev_priors
 
     def size(self):
         """
@@ -202,7 +204,7 @@ class DDPG:
             observation = np.concatenate((open_feature, high_feature, low_feature, close_feature, volume_feature), axis=2)
         return observation
 
-    def select_action(self, state, verbose=False,noise=None):
+    def select_action(self, state, verbose=False,noise=None, prior=None):
         """
         Selects an action based on the current policy (actor network).
 
@@ -213,212 +215,33 @@ class DDPG:
             ndarray: The selected action.
         """
         state = torch.FloatTensor(state).to(device)
-        final_portfolio, portfolio_weights = self.actor(state, noise, verbose=verbose)
-        return final_portfolio.cpu().data.numpy().flatten(), portfolio_weights.cpu().data.numpy()
+        if prior is not None:
+            prior = torch.FloatTensor(prior).to(device)
+        final_portfolio, portfolio_weights, index_regime_prior, prior = self.actor(
+                                                                        x=state,
+                                                                        noise=noise,
+                                                                        verbose=verbose,
+                                                                        prior=prior
+                                                                    )
+        return final_portfolio.cpu().data.numpy().flatten(), portfolio_weights.cpu().data.numpy(), index_regime_prior.cpu().numpy(), prior.cpu().numpy()
 
-    def freeze_actor_components(self, freeze_portfolio_generator=True, freeze_other_components=False):
-        """
-        Freeze or unfreeze specific components of the actor network.
-        
-        Args:
-            freeze_portfolio_generator (bool): Whether to freeze the portfolio weight generator
-            freeze_other_components (bool): Whether to freeze all other actor components
-        """
-        for name, param in self.actor.named_parameters():
-            if 'portfolio_weight_generator' in name:
-                param.requires_grad = not freeze_portfolio_generator
-            else:
-                param.requires_grad = not freeze_other_components
-                
-        # print(f"Portfolio generator frozen: {freeze_portfolio_generator}")
-        # print(f"Other components frozen: {freeze_other_components}")
-
-    def correlation_matrix(self, X: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-        """
-        Compute correlation matrix for each batch element.
-        X: (B, N, F) where N=num_regimes, F=1 for portfolio weights
-        Returns: (B, N, N) - correlation matrix across regimes
-        """
-        # For portfolio weights across regimes, we want to compute correlation across regimes (N dimension)
-        # X shape: (B, N, 1) -> we want (B, N) for correlation computation
-        if X.shape[-1] == 1:
-            X = X.squeeze(-1)  # (B, N) where N is num_regimes
-        
-        # Center
-        Xc = X - X.mean(dim=1, keepdim=True)               # (B, N)
-        # Normalize
-        Xn = Xc / (Xc.std(dim=1, unbiased=False, keepdim=True) + eps)
-        # Compute correlation matrix: (B, N, N) where N is num_regimes
-        R = torch.matmul(Xn.unsqueeze(-1), Xn.unsqueeze(1))  # (B, N, 1) x (B, 1, N) = (B, N, N)
-        return R
-
-    def mean_offdiag_sq(self, R: torch.Tensor) -> torch.Tensor:
-        """
-        Mean squared off-diagonal correlation per batch element.
-        R: (B, N, N) - correlation matrix where N is num_regimes
-        Returns: (B,) vector of scalars (one per batch)
-        """
-        B, N, _ = R.shape
-        I = torch.eye(N, device=R.device, dtype=R.dtype).expand(B, N, N)
-        offdiag = (R - I).pow(2).sum(dim=(1, 2))   # sum over N×N (regimes × regimes)
-        return offdiag / (N * (N - 1))
-
-    def train_phase1_portfolio_generator(self):
-        """
-        Phase 1: Train only the portfolio weight generator with a specific loss.
-        All other actor components are frozen.
-        """
+    def train(self):
         if self.replay_buffer.size() < self.replay_buffer.batch_size:
             return
 
-        # Freeze everything except portfolio weight generator
-        self.freeze_actor_components(freeze_portfolio_generator=False, freeze_other_components=True)
-
         # Sample a batch of transitions from replay buffer
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample()
+        states, actions, rewards, next_states, dones, index_regime_priors, prev_priors = self.replay_buffer.sample()
 
         states = torch.FloatTensor(states).to(device)
         actions = torch.FloatTensor(actions).to(device)
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(device)
         next_states = torch.FloatTensor(next_states).to(device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(device)
+        index_regime_priors = torch.FloatTensor(index_regime_priors).to(device)
+        prev_priors = torch.FloatTensor(prev_priors).to(device)
 
         # Compute the target Q value
-        next_actions, _ = self.actor_target(next_states)
-        target_Q = self.critic_target(next_states, next_actions)
-        target_Q = rewards + (self.discount * target_Q * (1 - dones))
-
-        # Get current Q estimate
-        current_Q = self.critic(states, actions)
-
-        # Compute critic loss
-        critic_loss = nn.MSELoss()(current_Q, target_Q.detach())
-
-        # Optimize the critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-        # Phase 1: Portfolio generator loss (e.g., based on Q-values)
-        predicted_actions, portfolio_weights = self.actor(states)
-        
-        # Compute correlation-based regularization loss
-        # portfolio_weights shape: (batch_size, num_regimes, num_stocks)
-        # We want to compute correlation ACROSS REGIMES for each stock
-        batch_size, num_regimes, num_stocks = portfolio_weights.shape
-        
-        # Transpose to (batch_size, num_stocks, num_regimes) to compute correlation across regimes
-        portfolio_weights_transposed = portfolio_weights.transpose(1, 2)  # (batch_size, num_stocks, num_regimes)
-        
-        # Reshape to (batch_size * num_stocks, num_regimes) to compute correlation per stock
-        portfolio_weights_reshaped = portfolio_weights_transposed.reshape(batch_size * num_stocks, num_regimes).unsqueeze(-1)
-        correlation_matrix = self.correlation_matrix(portfolio_weights_reshaped)
-        offdiag_loss = self.mean_offdiag_sq(correlation_matrix)
-        
-        q_values_for_actor = self.critic(states, predicted_actions)
-        portfolio_loss = -q_values_for_actor.mean() + 0.1 * offdiag_loss.mean()  # Maximize Q-values, minimize correlation across regimes
-
-        # Optimize only the portfolio generator
-        self.actor_optimizer.zero_grad()
-        portfolio_loss.backward()
-        self.actor_optimizer.step()
-
-        # Soft update the target networks
-        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-        for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-    def train_phase2_other_components(self):
-        """
-        Phase 2: Train all actor components except the portfolio weight generator.
-        The portfolio weight generator is frozen.
-        """
-        if self.replay_buffer.size() < self.replay_buffer.batch_size:
-            return
-
-        # Freeze portfolio generator, unfreeze everything else
-        self.freeze_actor_components(freeze_portfolio_generator=True, freeze_other_components=False)
-
-        # Sample a batch of transitions from replay buffer
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample()
-
-        states = torch.FloatTensor(states).to(device)
-        actions = torch.FloatTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(device)
-        next_states = torch.FloatTensor(next_states).to(device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(device)
-
-        # Compute the target Q value
-        next_actions, _ = self.actor_target(next_states)
-        target_Q = self.critic_target(next_states, next_actions)
-        target_Q = rewards + (self.discount * target_Q * (1 - dones))
-
-        # Get current Q estimate
-        current_Q = self.critic(states, actions)
-
-        # Compute critic loss
-        critic_loss = nn.MSELoss()(current_Q, target_Q.detach())
-
-        # Optimize the critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-        # Phase 2: Other components loss (e.g., regime detection loss)
-        predicted_actions, _ = self.actor(states)
-        q_values_for_actor = self.critic(states, predicted_actions)
-        
-        # You can add additional losses here for regime detection, etc.
-        # For example, you might want to add a loss for better regime classification
-        other_components_loss = -q_values_for_actor.mean()
-
-        # Optimize only the other components
-        self.actor_optimizer.zero_grad()
-        other_components_loss.backward()
-        self.actor_optimizer.step()
-
-        # Soft update the target networks
-        for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-        for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
-            target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-    def train(self, training_phase='normal'):
-        """
-        Trains the DDPG agent using sampled experiences from the replay buffer.
-        Updates both actor and critic networks and performs soft target network updates.
-        
-        Args:
-            training_phase (str): 'normal', 'phase1', or 'phase2' for different training modes
-        """
-        if training_phase == 'phase1':
-            self.train_phase1_portfolio_generator()
-            return
-        elif training_phase == 'phase2':
-            self.train_phase2_other_components()
-            return
-        
-        # Normal training (original behavior)
-        if self.replay_buffer.size() < self.replay_buffer.batch_size:
-            return
-
-        # Unfreeze all components for normal training
-        self.freeze_actor_components(freeze_portfolio_generator=False, freeze_other_components=False)
-
-        # Sample a batch of transitions from replay buffer
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample()
-
-        states = torch.FloatTensor(states).to(device)
-        actions = torch.FloatTensor(actions).to(device)
-        rewards = torch.FloatTensor(rewards).unsqueeze(1).to(device)
-        next_states = torch.FloatTensor(next_states).to(device)
-        dones = torch.FloatTensor(dones).unsqueeze(1).to(device)
-
-        # Compute the target Q value
-        next_actions = self.actor_target(next_states)
+        next_actions,_,_,_ = self.actor_target(x=next_states, prior=index_regime_priors)
         target_Q = self.critic_target(next_states, next_actions)
         target_Q = rewards + (self.discount * target_Q * (1 - dones))
 
@@ -434,7 +257,7 @@ class DDPG:
         self.critic_optimizer.step()
 
         # Compute actor loss
-        predicted_actions, _ = self.actor(states)
+        predicted_actions,_,_,_ = self.actor(x=states, prior=prev_priors)
         q_values_for_actor = self.critic(states, predicted_actions)
         max_q_value = q_values_for_actor.max().item()
         self.maxQ = max_q_value
@@ -459,8 +282,8 @@ class DDPG:
         Args:
             transition (tuple): A tuple containing (state, next_state, action, reward, done).
         """
-        state, next_state, action, reward, done = transition
-        self.replay_buffer.add(state, action, reward, next_state, done)
+        state, next_state, action, reward, done, index_regime_prior, prev_prior = transition
+        self.replay_buffer.add(state, action, reward, next_state, done, index_regime_prior, prev_prior)
 
     def save_model(self, actor_path, critic_path):
         """

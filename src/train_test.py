@@ -91,21 +91,31 @@ def main():
     agent = DDPG(seed, nb_classes, nb_classes-1, window_length//window_period, num_features)
     env = PortfolioEnv(train_data, len(stocks)-1, num_training_time, num_training_time-window_length-window_period, window_length, window_period, rebalancing, buy_fee, sell_fee, time_cost, random_start)
 
+    portfolio_order = [stocks[-1]] + list(stocks[:-1])
     for _ in range(episode):
         state, info = env.reset()
         state = agent.obs_normalizer(state)
 
         episode_reward = 0
         verbose = False
+        index_regime_prior = None
         for step in range(max_step):
             if step % 10 == 0:
                 verbose = True
-            action, portfolio_weights = agent.select_action(state, verbose=verbose, noise=agent.noise())
+                if step > 0:
+                    idx = np.argmax(action)
+                    print(f"largest weight: {portfolio_order[idx]}, {action[idx]}")
+            action, portfolio_weights, index_regime_prior, prev_prior = agent.select_action(
+                                                                        state,
+                                                                        verbose=verbose,
+                                                                        noise=agent.noise(),
+                                                                        prior=index_regime_prior
+                                                                  )
             verbose = False
             next_state, reward, done, info = env.step(action, portfolio_weights)
             next_state = agent.obs_normalizer(next_state)
-            agent.add_transition((state, next_state, action, reward, float(done)))
-            agent.train(training_phase='phase1')
+            agent.add_transition((state, next_state, action, reward, float(done), index_regime_prior, prev_prior))
+            agent.train()
 
             state = next_state
             episode_reward += reward

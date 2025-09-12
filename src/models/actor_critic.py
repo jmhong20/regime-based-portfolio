@@ -31,7 +31,6 @@ class PortfolioWeightGenerator(nn.Module):
             nn.Linear(hidden_dim, 1) for _ in range(num_stock_regimes)
         ])
         self.weight_activation = nn.Tanh()
-        self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x):
         """
@@ -55,7 +54,7 @@ class PortfolioWeightGenerator(nn.Module):
             weights = weights.reshape(batch_size, num_stocks)
             regime_weights.append(weights)
         portfolio_weights = torch.stack(regime_weights, dim=1)
-        return self.softmax(portfolio_weights)
+        return portfolio_weights
 
 class Actor(nn.Module):
     def __init__(self,
@@ -103,7 +102,6 @@ class Actor(nn.Module):
             hidden_dim=hidden_dim,
             num_regimes=3, mid=192, dropout=0.1
         )
-
         self.stock_regime_detector = StockRegimeDetector(
             stock_feature_dim=hidden_dim,
             index_regime_dim=3,
@@ -129,7 +127,7 @@ class Actor(nn.Module):
             dropout=dropout
         )
 
-    def forward(self, x, noise=None, verbose=False):
+    def forward(self, x, noise=None, verbose=False, prior=None):
         if x.ndimension() == 3:  # Single sample case: (N,T,F)
             x = x.unsqueeze(0)  # Add batch dimension → (batch,N,T,F)
         batch, _, _, _ = x.shape
@@ -148,7 +146,9 @@ class Actor(nn.Module):
         x_index = x_index.reshape(-1, x_index.size(-1))  # Reshape to (batch×1,H)
         x_stocks = self.transformer(x_stocks)
         # Get regime probabilities P(regime|x_index)
-        index_regime_probs, extras = self.index_regime_detector(x_index)
+        if prior is None:
+            prior = torch.full((batch, 3), 1.0 / 3, device=x.device, dtype=x.dtype)
+        index_regime_probs, extras = self.index_regime_detector(x_index, prior)
         batch_size = x_stocks.shape[0] // self.N
         x_stocks_reshaped = x_stocks.reshape(batch_size, self.N, -1)
         # Get stock regime probabilities P(stock_regimes|index_regimes, x_stock)
@@ -167,9 +167,14 @@ class Actor(nn.Module):
         final_portfolio = weighted_portfolios.sum(dim=1)
 
         if verbose:
-            # print("cash weight", final_portfolio[0][0])
-            print(index_regime_probs)
-        return final_portfolio, portfolio_weights
+            print(index_regime_probs, final_portfolio[0][0])
+
+
+        if noise is not None:
+            noise = torch.from_numpy(noise).float().to(x.device)
+            final_portfolio += noise
+        final_portfolio = torch.softmax(final_portfolio, dim=1)
+        return final_portfolio, portfolio_weights, index_regime_probs.detach(), prior.detach()
 
 
 class Critic(nn.Module):
@@ -312,6 +317,7 @@ class NeuralHMMRegimeDetector(nn.Module):
             posterior: (B, K)
             extras: dict
         """
+        prev_posterior = prev_posterior.reshape(-1, prev_posterior.size(-1))  # Reshape to (batch×1,H)
         B = x.size(0)
         K = self.K
 
