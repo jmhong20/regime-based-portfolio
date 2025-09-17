@@ -56,7 +56,7 @@ class PortfolioSim:
         self.p0 = 0
         self.infos = []
 
-    def step(self, w1, y1, portfolio_weights):
+    def step(self, w1, y1):
         assert w1.shape == y1.shape, 'w1 and y1 must have the same shape'
         # assert y1[0] == 1.0, 'y1[0] must be 1'
 
@@ -134,7 +134,7 @@ class PortfolioEnv:
 
         self.infos = []
 
-    def step(self, action, portfolio_weights):
+    def step(self, action):
         np.testing.assert_almost_equal(action.shape,(self.num_assets + 1,))
 
         # normalise just in case
@@ -164,7 +164,7 @@ class PortfolioEnv:
         # print("REBAL:", next_day[-1,0,-1], next_day[-1,-1,-1])
         # y1[0] = 1.5
 
-        reward, info, done2 = self.sim.step(weights, y1[:(self.num_assets + 1)], portfolio_weights)
+        reward, info, done2 = self.sim.step(weights, y1[:(self.num_assets + 1)])
 
         info['market_value'] = np.cumprod([inf["return"] for inf in self.infos + [info]])[-1]
         info['date'] = str(observation[-1, -1, -1]).replace('.0', '')

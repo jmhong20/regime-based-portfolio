@@ -9,6 +9,73 @@ import argparse
 
 from utils.helper import *
 
+tickers_list = {
+    'us_stocks2': [
+        "AAPL", # 1
+        "AMZN", # 2
+        "AVGO", # 3
+        "COST", # 4
+        "GOOGL", # 5
+        "HD", # 6
+        "JNJ", # 7
+        "JPM", # 8
+        "LLY", # 9
+        "MA", # 10
+        "META", # 11
+        "MSFT", # 12
+        "NFLX", # 13
+        "NVDA", # 14
+        "PG", # 15
+        "TSLA", # 16
+        "UNH", # 17
+        "V", # 18
+        "WMT", # 19
+        "XOM", # 20
+    ],
+    'us_stocks3': [
+        "NVDA", # 1
+        "MSFT", # 2
+        "AAPL", # 3
+        "AMZN", # 4
+        "GOOGL", # 5
+        "META", # 6
+        "AVGO", # 7
+        "TSM", # 8
+        "TSLA", # 9
+        "BRK", # 10
+        "JPM", # 11
+        "WMT", # 12
+        "LLY", # 13
+        "ORCL", # 14
+        "V", # 15
+        "NFLX", # 16
+        "MA", # 17
+        "XOM", # 18
+        "COST", # 19
+        "JNJ", # 20
+        "BAC", # 21
+        "PG", # 22
+        "PLTR", # 23
+        "HD", # 24
+        "SAP", # 25
+        "ABBV", # 26
+        "CVX", # 27
+        "KO", # 28
+        "ASML", # 29
+        "BABA", # 30
+        "GE", # 31
+        "PM", # 32
+        "CSCO", # 33
+        "WFC", # 34
+        "IBM", # 35
+        "TMUS", # 36
+        "UNH", # 37
+        "AMD", # 38
+        "CRM", # 39
+        "MS", # 40
+    ]
+}
+
 def parse_args():
     """
     Parse command line arguments.
@@ -40,14 +107,15 @@ def main():
     task = args.task
     save_numpy = args.save_numpy
 
-    if country == "us":
-        tickers = get_snp500_tickers()
+    if country == "us2":
+        # tickers = get_snp500_tickers()
+        tickers = tickers_list["us_stocks2"]
         index_ticker = '^GSPC'
         download_data = download_snp500_data
-        directory = '../data/us'
+        directory = '../data/us2'
         os.makedirs(directory, exist_ok=True)
-        data_path = '../data/us/snp500_data.csv'
-        numpy_path = '../data/us/snp500_data.npy'
+        data_path = '../data/us2/snp500_data.csv'
+        numpy_path = '../data/us2/snp500_data.npy'
 
     if target_date is None:
         end_date = datetime.today().strftime("%Y-%m-%d")
@@ -129,6 +197,7 @@ def pad_tickers_to_union_dates(df, date_col='date', ticker_col='ticker',fill='bf
 
 def download_snp500_data(tickers, start_date, end_date):
     data = []
+    index_ticker = '^GSPC'
     for ticker in tickers+[index_ticker]:
         d = yf.download(ticker, start=start_date, end=end_date, auto_adjust=False)
         d_flat = d.stack(level='Ticker').reset_index()

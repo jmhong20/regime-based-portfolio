@@ -67,10 +67,12 @@ class Actor(nn.Module):
                     transformer_d_model=64,
                     transformer_nhead=8,
                     transformer_layers=2,
-                    mlp_hidden_size=256
+                    mlp_hidden_size=256,
+                    num_regimes=5
                 ):
         super(Actor, self).__init__()
         self.seed = torch.manual_seed(seed)
+        self.num_regimes = num_regimes
         self.feature_mapping = FeatureMapping(F, initial_feature_map_dim)
 
         self.N, self.T, self.F = N, T, F
@@ -100,12 +102,12 @@ class Actor(nn.Module):
         """
         self.index_regime_detector = NeuralHMMRegimeDetector(
             hidden_dim=hidden_dim,
-            num_regimes=3, mid=192, dropout=0.1
+            num_regimes=num_regimes, mid=192, dropout=0.1
         )
         self.stock_regime_detector = StockRegimeDetector(
             stock_feature_dim=hidden_dim,
-            index_regime_dim=3,
-            num_stock_regimes=3,
+            index_regime_dim=num_regimes,
+            num_stock_regimes=num_regimes,
             hidden_dim=64,
             num_layers=2,
             dropout=dropout
@@ -121,7 +123,7 @@ class Actor(nn.Module):
         )
         self.portfolio_weight_generator = PortfolioWeightGenerator(
             stock_feature_dim=hidden_dim,
-            num_stock_regimes=3,
+            num_stock_regimes=num_regimes,
             hidden_dim=64,
             num_layers=2,
             dropout=dropout
@@ -147,8 +149,10 @@ class Actor(nn.Module):
         x_stocks = self.transformer(x_stocks)
         # Get regime probabilities P(regime|x_index)
         if prior is None:
-            prior = torch.full((batch, 3), 1.0 / 3, device=x.device, dtype=x.dtype)
+            prior = torch.full((batch, self.num_regimes), 1.0 / self.num_regimes, device=x.device, dtype=x.dtype)
         index_regime_probs, extras = self.index_regime_detector(x_index, prior)
+        # index_regime_probs = self.index_regime_detector(x_index)
+
         batch_size = x_stocks.shape[0] // self.N
         x_stocks_reshaped = x_stocks.reshape(batch_size, self.N, -1)
         # Get stock regime probabilities P(stock_regimes|index_regimes, x_stock)
@@ -174,7 +178,8 @@ class Actor(nn.Module):
             noise = torch.from_numpy(noise).float().to(x.device)
             final_portfolio += noise
         final_portfolio = torch.softmax(final_portfolio, dim=1)
-        return final_portfolio, portfolio_weights, index_regime_probs.detach(), prior.detach()
+        return final_portfolio, index_regime_probs.detach(), prior.detach()
+        # return final_portfolio, None, None
 
 
 class Critic(nn.Module):
@@ -196,12 +201,13 @@ class Critic(nn.Module):
         self.fc1 = nn.Linear(N+1, critic_hidden_size) # state
         self.fc_action = nn.Linear(action_dim, critic_hidden_size) # action
         # self.bn = nn.BatchNorm1d(critic_hidden_size) if critic_use_batch_norm else None
-        self.bn = nn.BatchNorm1d(critic_hidden_size*2) if critic_use_batch_norm else None
+        self.bn = nn.LayerNorm(critic_hidden_size) if critic_use_batch_norm else None
         # self.fc_out = nn.Linear(critic_hidden_size, 1) # Q-value
-        self.fc_out = nn.Linear(critic_hidden_size * 2, 1) # Q-value (doubled due to concatenation)
+        self.fc_out1 = nn.Linear(critic_hidden_size * 2, critic_hidden_size) # Q-value (doubled due to concatenation)
+        self.fc_out2 = nn.Linear(critic_hidden_size, 1) # Q-value (doubled due to concatenation)
         self.use_batch_norm = critic_use_batch_norm
 
-        nn.init.uniform_(self.fc_out.weight, a=-0.03, b=0.03) 
+        nn.init.uniform_(self.fc_out2.weight, a=-0.03, b=0.03) 
 
         self.seed = torch.manual_seed(seed)
         self.feature_mapping = FeatureMapping(F, initial_feature_map_dim)
@@ -271,13 +277,15 @@ class Critic(nn.Module):
         # x = t1 + t2
         # Concatenate state and action features instead of adding
         x = torch.cat([t1, t2], dim=-1)
-        if batch > 1 and self.use_batch_norm:
+        x = self.fc_out1(x)
+        if self.use_batch_norm:
             x = self.bn(x)
 
         x = F.relu(x)
-        q_value = self.fc_out(x)
+        q_value = self.fc_out2(x)
         return q_value
 
+# TODO
 class NeuralHMMRegimeDetector(nn.Module):
     """
     One-step Neural-HMM regime filter (index-level).

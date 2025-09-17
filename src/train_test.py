@@ -32,7 +32,7 @@ def parse_args():
 
     parser.add_argument('--target_date', type=str, default='20240102')
     parser.add_argument('--train_period', type=int, default=10)
-    parser.add_argument('--country', type=str, default='us')
+    parser.add_argument('--country', type=str, default='us2')
     return parser.parse_known_args()
 
 def main():
@@ -58,6 +58,9 @@ def main():
     if country == "us":
         data_path = '/home/jmhong20/regime-based-portfolio/data/us/snp500_data.csv'
         numpy_path = '/home/jmhong20/regime-based-portfolio/data/us/snp500_data.npy'
+    elif country == "us2":
+        data_path = '/home/jmhong20/regime-based-portfolio/data/us2/snp500_data.csv'
+        numpy_path = '/home/jmhong20/regime-based-portfolio/data/us2/snp500_data.npy'
 
     history_df = pd.read_csv(data_path)
     print(len(history_df['ticker'].unique()))
@@ -105,14 +108,14 @@ def main():
                 if step > 0:
                     idx = np.argmax(action)
                     print(f"largest weight: {portfolio_order[idx]}, {action[idx]}")
-            action, portfolio_weights, index_regime_prior, prev_prior = agent.select_action(
+            action, index_regime_prior, prev_prior = agent.select_action(
                                                                         state,
                                                                         verbose=verbose,
                                                                         noise=agent.noise(),
                                                                         prior=index_regime_prior
                                                                   )
             verbose = False
-            next_state, reward, done, info = env.step(action, portfolio_weights)
+            next_state, reward, done, info = env.step(action)
             next_state = agent.obs_normalizer(next_state)
             agent.add_transition((state, next_state, action, reward, float(done), index_regime_prior, prev_prior))
             agent.train()

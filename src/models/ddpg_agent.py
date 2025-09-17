@@ -8,7 +8,7 @@ from collections import deque
 from .actor_critic import Actor, Critic
 
 # Check if GPU is available
-device = 3
+device = 2
 if device == None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # else:
@@ -217,13 +217,14 @@ class DDPG:
         state = torch.FloatTensor(state).to(device)
         if prior is not None:
             prior = torch.FloatTensor(prior).to(device)
-        final_portfolio, portfolio_weights, index_regime_prior, prior = self.actor(
+        final_portfolio, index_regime_prior, prior = self.actor(
                                                                         x=state,
                                                                         noise=noise,
                                                                         verbose=verbose,
                                                                         prior=prior
                                                                     )
-        return final_portfolio.cpu().data.numpy().flatten(), portfolio_weights.cpu().data.numpy(), index_regime_prior.cpu().numpy(), prior.cpu().numpy()
+        return final_portfolio.cpu().data.numpy().flatten(), index_regime_prior.cpu().numpy(), prior.cpu().numpy()
+        # return final_portfolio.cpu().data.numpy().flatten(), None, None
 
     def train(self):
         if self.replay_buffer.size() < self.replay_buffer.batch_size:
@@ -241,7 +242,7 @@ class DDPG:
         prev_priors = torch.FloatTensor(prev_priors).to(device)
 
         # Compute the target Q value
-        next_actions,_,_,_ = self.actor_target(x=next_states, prior=index_regime_priors)
+        next_actions,_,_ = self.actor_target(x=next_states, prior=index_regime_priors)
         target_Q = self.critic_target(next_states, next_actions)
         target_Q = rewards + (self.discount * target_Q * (1 - dones))
 
@@ -254,10 +255,12 @@ class DDPG:
         # Optimize the critic
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+
+
         self.critic_optimizer.step()
 
         # Compute actor loss
-        predicted_actions,_,_,_ = self.actor(x=states, prior=prev_priors)
+        predicted_actions,_,_ = self.actor(x=states, prior=prev_priors)
         q_values_for_actor = self.critic(states, predicted_actions)
         max_q_value = q_values_for_actor.max().item()
         self.maxQ = max_q_value
@@ -266,6 +269,7 @@ class DDPG:
         # Optimize the actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+
         self.actor_optimizer.step()
 
         # Soft update the target networks
